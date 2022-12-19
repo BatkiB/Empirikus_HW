@@ -1,0 +1,161 @@
+class homework:
+    def __init__(self):
+        self.soc_pokec_profiles = pd.read_csv('soc-pokec-profiles.txt', index_col= False, sep="\t")
+        self.soc_pokec_relationships = pd.read_csv('soc-pokec-relationships.txt', index_col= False, sep="\t")
+        
+    def szures_profil(self, soc_pokec_profiles):
+        soc_pokec_profiles = soc_pokec_profiles[['1', '1.1', '1.2','26']]
+        soc_pokec_profiles = soc_pokec_profiles.rename(columns = {"1":"User_id", "1.1":"Public" ,"1.2":"Gender", "26":"Age"})
+        return soc_pokec_profiles
+        
+    def szures_retationships(self, soc_pokec_relationships):
+        soc_pokec_relationships = soc_pokec_relationships.rename(columns = {"1":"Source", "13":"Sink"})
+        return soc_pokec_relationships
+    
+    def select_relevant_profiles(self, all_profiles):
+        """Releváns profilok kiválasztása
+        Kritérium:
+        * publikus
+        * 14 év feletti életkor
+        * nem legyen megadva
+        """
+        public_condition = all_profiles["Public"] == 1
+        age_condition = all_profiles["Age"] > 14
+        gender_condition = all_profiles["Gender"].isin([0, 1])
+        return all_profiles.loc[public_condition & age_condition & gender_condition]
+
+    def select_relevant_edges(self, all_edges, selected_ids):
+        """Élek adatbázisból relevánsak kiválasztása az előző kritériumok szerint megtisztított releváns profilok alapján"""
+        source_condition = all_edges["Source"].isin(selected_ids)
+        sink_condition = all_edges["Sink"].isin(selected_ids)
+        return all_edges.loc[source_condition & sink_condition]
+    
+    def convert_edges_to_undirected(self, relevant_edges):
+        """Irány nélküli éleké konvertlás és csak az oda-vissza kapcsolatok megtartása"""
+        undirected_edges = (
+            relevant_edges.assign(
+                Smaller_id=lambda df: df[["Source", "Sink"]].min(axis=1),
+                Greater_id=lambda df: df[["Source", "Sink"]].max(axis=1),
+            )
+            .groupby(["Smaller_id", "Greater_id"])
+            .agg({"Source": "count"})
+        )
+        print(undirected_edges["Source"].value_counts())
+        return (
+            undirected_edges.loc[undirected_edges["Source"] == 2]
+            .drop("Source", axis=1)
+            .reset_index()
+        )
+    
+    def create_graph_from_nodes_and_edges(self, nodes, edges):
+        """Networkx package segítségével gráf megalkotása a releváns jellemzők szerint"""
+        node_attributes = nodes.set_index("User_id").to_dict(orient="index")
+        node_attributes_list = [
+            (index, attr_dict) for index, attr_dict in node_attributes.items()
+        ]
+        G = nx.Graph()
+        G.add_nodes_from(node_attributes_list)
+        G.add_edges_from(edges.values.tolist())
+        return G
+
+    def add_node_features_to_edges(self, nodes, edges):
+        """Hőtérképek miatt a csúcsok jellemzőinek hozzárendelése az élekhez"""
+        edges_w_features = edges.merge(
+            nodes[["User_id", "Age", "Gender"]].set_index("User_id"),
+            how="left",
+            left_on="Smaller_id",
+            right_index=True,
+        )
+        edges_w_features = edges_w_features.merge(
+            nodes[["User_id", "Age", "Gender"]].set_index("User_id"),
+            how="left",
+            left_on="Greater_id",
+            right_index=True,
+        )
+        return edges_w_features
+    
+        return nodes
+    
+    def plot_degree_distribution(self, G):
+        """Fokszám-eloszlás ábrázolása"""
+        plot_df = (
+            pd.Series(dict(G.degree)).value_counts().sort_index().to_frame().reset_index()
+        )
+        plot_df.columns = ["k", "count"]
+        plot_df["log_k"] = np.log(plot_df["k"])
+        plot_df["log_count"] = np.log(plot_df["count"])
+        fig, ax = plt.subplots()
+
+        ax.scatter(plot_df["k"], plot_df["count"])
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        fig.suptitle("Mutual Degree Distribution")
+        ax.set_xlabel("k")
+        ax.set_ylabel("count_k")
+        
+    def plot_age_distribution_by_gender(self, nodes):
+        """Hisztogram nemenként"""
+        plot_df = nodes[["Age", "Gender"]].copy(deep=True).astype(float)
+        plot_df["Gender"] = plot_df["Gender"].replace({0.0: "woman", 1.0: "man"})
+        sns.histplot(data=plot_df, x="Age", hue="Gender", bins=np.arange(0, 45, 5) + 15)
+        
+    def plot_node_degree_by_gender(self, nodes, G):
+        """Nemenként és koronként az átlagos fokszám ábrázolása"""
+        nodes_w_degree = nodes.set_index("User_id").merge(
+            pd.Series(dict(G.degree)).to_frame(),
+            how="left",
+            left_index=True,
+            right_index=True,
+        )
+        nodes_w_degree = nodes_w_degree.rename({0: "degree"}, axis=1)
+        nodes_w_degree["Gender"].replace([0.0, 1.0], ["Female", "Male"], inplace=True)
+        plot_df = (
+            nodes_w_degree.groupby(["Age", "Gender"]).agg({"degree": "mean"}).reset_index()
+        )
+
+        ax = sns.lineplot(
+            data=plot_df, x="Age", y="degree", hue="Gender", palette=["red", "blue"]
+        )
+        ax.set_xlabel("Age")
+        ax.set_ylabel("Degree")
+        ax.set_title("(a) Degree Centrality")
+        
+    def plot_node_neighbor_conn_by_gender(nodes, G):
+        """Neighbour-connectivity ábrázolása: egy csúcs szomszédjainak átlagos fokszáma"""
+        nodes_w_neighbor_conn = nodes
+
+        # using the inbuilt nx.average_neighbor_degree function, and mapping it to each node
+        nodes_w_neighbor_conn = nodes_w_neighbor_conn.assign(
+            neighbor_conn=nodes_w_neighbor_conn.User_id.map(nx.average_neighbor_degree(G))
+        )
+        nodes_w_neighbor_conn["Gender"].replace(
+            [0.0, 1.0], ["Female", "Male"], inplace=True
+        )
+
+        plot_df = (
+            nodes_w_neighbor_conn.groupby(["Age", "Gender"])
+            .agg({"neighbor_conn": "mean"})
+            .reset_index()
+        )
+        ax = sns.lineplot(
+            data=plot_df, x="Age", y="neighbor_conn", hue="Gender", palette=["red", "blue"]
+        )
+        ax.set_xlabel("Age")
+        ax.set_ylabel("Neighbor Connectivity")
+        ax.set_title("(b) Neighbor Connectivity")
+        
+    def plot_age_relations_heatmap(self, edges_w_features):
+        """Plot a heatmap that represents the distribution of edges"""
+        plot_df = edges_w_features.groupby(["Gender_x", "Gender_y", "Age_x", "Age_y"]).agg(
+            {"Smaller_id": "count"}
+        )
+        plot_df_w_w = plot_df.loc[(0, 0)].reset_index()
+        plot_df_heatmap = plot_df_w_w.pivot_table(
+            index="Age_x", columns="Age_y", values="Smaller_id"
+        ).fillna(0)
+        plot_df_heatmap_logged = np.log(plot_df_heatmap + 1)
+        ax = sns.heatmap(plot_df_heatmap_logged, cmap = "jet")
+        ax.invert_yaxis()
+        ax.set_xlabel("Age")
+        ax.set_ylabel("Age")
+        ax.set_title("(a) #connections per pair")
